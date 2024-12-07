@@ -1,0 +1,38 @@
+```{r}
+rm(list=ls())
+```
+
+#Importation du jeu de données
+
+```{r}
+install.packages("readr")
+library(readr)
+```
+
+```{r}
+#Jeu de données
+data <- read_delim("FX_SOUID115726.txt", delim = ",", col_names = TRUE, show_col_types = FALSE, skip = 18)
+
+#Missing & Suspect Values
+library(dplyr)
+colnames(data) <- trimws(colnames(data))
+data$FX <- as.numeric(data$FX)
+data <- data %>% filter(FX != -9999) %>% #Missing values
+  filter(Q_FX != 1) #Suspect values
+```
+
+#Visualiser les rafales max journalières pour une année donnée
+
+```{r}
+data <- data %>%
+  mutate(DATE = as.Date(as.character(DATE), format = "%Y%m%d"))
+
+data_2000 <- data %>% filter(format(DATE, "%Y") == "2002")
+
+ggplot(data_2000, aes(x = DATE, y = FX)) +
+  geom_line() +
+  labs(title = "Évolution de FX en fonction de la date pour l'année 2000",
+       x = "Date",
+       y = "FX") +
+  theme_minimal()
+```

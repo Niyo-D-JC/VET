@@ -1,0 +1,218 @@
+---
+title: "TVE_env NiyoD"
+author: "Niyo D. JC"
+date: "2024-10-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Importation
+
+```{r}
+data <- read.csv("FX_SOUID115726.txt", header = TRUE, skip = 18,
+                 na.strings = -9999)
+data <- data[!is.na(data$FX), ]
+```
+
+### Exploration
+
+```{r}
+data$DATE <- as.Date(as.character(data$DATE), format="%Y%m%d") 
+data$FX <- data$FX / 10 
+summary(data$FX)
+```
+
+```{r}
+(sd_fx <- sd(data$FX, na.rm = TRUE))
+```
+
+```{r}
+hist(data$FX, main="Distribution des rafales de vent (FX)", xlab="Rafales de vent (m/s)", breaks=30, col="lightblue")
+```
+
+```{r}
+raf_vent <- ts(data$FX, frequency = 365) # 252 pour les jours de trading annuels
+decomp <- decompose(raf_vent)
+plot(decomp)
+```
+
+```{r}
+plot(data$DATE, data$FX, type="l", main="Évolution temporelle des rafales de vent (FX)", xlab="Date", ylab="Rafales de vent (m/s)", col="blue")
+```
+
+```{r}
+library(tseries)
+(adf_test <- adf.test(data$FX, alternative = "stationary", k = 6))
+```
+
+```{r}
+acf(data$FX, main="Autocorrélation des rafales de vent", lag.max = 356*5)
+```
+
+```{r}
+pacf(data$FX, main="Autocorrélation partielles des rafales de vent", lag.max=365*5)
+```
+
+#### GEV : Dégroupage des données (Run Declustering)
+
+```{r}
+clusters(data$FX, 10, 5, plot = TRUE)
+```
+
+```{r}
+library(extRemes)
+
+# Définir les paramètres du dégroupage
+u <- 11
+r <- 30   # Fenêtre temporelle pour regrouper les observations proches
+
+
+# Dégroupage des données
+run_declustering <- function(data, threshold, window_size) {
+  above_threshold <- which(data$FX > threshold)
+  declustered_events <- c()
+  
+  i <- 1
+  while (i <= length(above_threshold)) {
+    event_window <- above_threshold[above_threshold <= above_threshold[i] + window_size]
+    max_event <- which.max(data$FX[event_window])
+    declustered_events <- c(declustered_events, event_window[max_event])
+    i <- max(event_window) + 1  # Passer à la prochaine fenêtre
+  }
+  
+  return(data[declustered_events, ])
+}
+
+# Appliquer le dégroupage
+max_data <- run_declustering(data, threshold = u, window_size = r)
+```
+
+```{r}
+t <- 1:nrow(max_data)
+fit <- fevd(max_data$FX, type = "GEV",
+            location.fun = ~ t + sin(2 * pi * t / 365) + cos(2 * pi * t / 365),
+            scale.fun = ~ t)
+
+```
+
+#### GEV : Brut
+
+```{r}
+# Ajouter l'année et le mois comme colonnes
+data$Year <- year(data$DATE)
+data$Month <- month(data$DATE)
+
+# Regrouper novembre, décembre et janvier dans le même trimestre
+data$CustomQuarter <- case_when(
+  data$Month %in% c(11, 12, 1) ~ "Q1",  # Novembre, Décembre, Janvier
+  data$Month %in% c(2, 3, 4)   ~ "Q2",  # Février, Mars, Avril
+  data$Month %in% c(5, 6, 7)   ~ "Q3",  # Mai, Juin, Juillet
+  data$Month %in% c(8, 9, 10)  ~ "Q4"   # Août, Septembre, Octobre
+)
+
+# Ajuster l'année pour novembre et décembre (attribués au début de l'année suivante)
+data$AdjustedYear <- ifelse(data$Month == 11 | data$Month == 12, data$Year + 1, data$Year)
+
+# Calcul des maxima pour les trimestres personnalisés
+custom_quarterly_max <- aggregate(FX ~ AdjustedYear + CustomQuarter, data = data, FUN = max, na.rm = TRUE)
+
+# Numéroter les trimestres consécutifs
+custom_quarterly_max$QuarterID <- seq_len(nrow(custom_quarterly_max))
+```
+
+```{r}
+# Ajustement du modèle GEV
+t <- custom_quarterly_max$QuarterID  # Indice temporel
+fit <- fevd(custom_quarterly_max$FX, type = "GEV",
+            location.fun = ~ t + sin(2 * pi * t /4) + cos(2 * pi * t / 4),  # Sinusoidalité trimestrielle
+            scale.fun = ~ t)
+```
+
+```{r}
+summary(fit)
+```
+
+```{r}
+plot(fit)
+```
+
+### Utilisation d'un GARCH(1,1)
+
+```{r}
+library(rugarch)
+library(evir)
+
+# Définir la série temporelle de vos données (exemple avec custom_quarterly_max$FX)
+y <- data$FX
+
+# Spécifier le modèle GARCH(1,1) avec une distribution t de Student
+garch_spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+  distribution.model = "std"  # t-distribution pour les queues épaisses
+)
+
+# Estimer le modèle GARCH(1,1)
+garch_fit <- ugarchfit(spec = garch_spec, data = y)
+conditional_variance <- sigma(garch_fit)
+# Afficher les résultats du modèle GARCH
+summary(garch_fit)
+
+# Récupérer les résidus conditionnels (variance conditionnelle) pour les intégrer dans le modèle GEV
+epsilon_t <- residuals(garch_fit)
+
+data$residuals <- epsilon_t / conditional_variance
+```
+
+```{r}
+# Ajouter l'année et le mois comme colonnes
+data$Year <- year(data$DATE)
+data$Month <- month(data$DATE)
+
+# Regrouper novembre, décembre et janvier dans le même trimestre
+data$CustomQuarter <- case_when(
+  data$Month %in% c(11, 12, 1) ~ "Q1",  # Novembre, Décembre, Janvier
+  data$Month %in% c(2, 3, 4)   ~ "Q2",  # Février, Mars, Avril
+  data$Month %in% c(5, 6, 7)   ~ "Q3",  # Mai, Juin, Juillet
+  data$Month %in% c(8, 9, 10)  ~ "Q4"   # Août, Septembre, Octobre
+)
+
+# Ajuster l'année pour novembre et décembre (attribués au début de l'année suivante)
+data$AdjustedYear <- ifelse(data$Month == 11 | data$Month == 12, data$Year + 1, data$Year)
+
+# Calcul des maxima pour les trimestres personnalisés
+custom_quarterly_max <- aggregate(residuals ~ AdjustedYear + CustomQuarter, data = data, FUN = max, na.rm = TRUE)
+
+# Numéroter les trimestres consécutifs
+custom_quarterly_max$QuarterID <- seq_len(nrow(custom_quarterly_max))
+```
+
+```{r}
+# Ajustement du modèle GEV
+t <- custom_quarterly_max$QuarterID  # Indice temporel
+fit <- fevd(custom_quarterly_max$V1, type = "GEV",
+            location.fun = ~ t + sin(2 * pi * t /4) + cos(2 * pi * t / 4),  # Sinusoidalité trimestrielle
+            scale.fun = ~ t)
+```
+
+```{r}
+summary(fit)
+```
+
+#### Vue sur le depassement de seuil
+
+```{r}
+threshold <- quantile(data$FX, 0.95, na.rm = TRUE)
+extreme_values <- data$FX[data$FX > threshold]
+```
+
+```{r}
+hist(extreme_values, main="Valeurs extrêmes des rafales de vent", xlab="Rafales de vent (m/s)", col="orange", breaks=20)
+```
+
+```{r}
+
+```

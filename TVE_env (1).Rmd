@@ -1,0 +1,222 @@
+
+```{r}
+rm(list=ls())
+```
+
+
+
+#--------------------------------------------
+#----------PREPARATION-DES-DONNEES-----------
+#--------------------------------------------
+
+
+#Importation du jeu de données
+```{r}
+install.packages("readr")
+library(readr)
+```
+
+```{r}
+#Jeu de données
+data <- read_delim("FX_SOUID115726.txt", delim = ",", col_names = TRUE, show_col_types = FALSE, skip = 18)
+
+#Missing & Suspect Values
+library(dplyr)
+colnames(data) <- trimws(colnames(data))
+data$FX <- as.numeric(data$FX)
+data <- data %>% filter(FX != -9999) %>% #Missing values
+  filter(Q_FX != 1) #Suspect values
+```
+
+
+#Visualiser les rafales max journalières pour quelques années données
+```{r}
+data <- data %>%
+  mutate(DATE = as.Date(as.character(DATE), format = "%Y%m%d"))
+
+data_2000 <- data %>% filter(format(DATE, "%Y") == "2000")
+data_2001 <- data %>% filter(format(DATE, "%Y") == "2001")
+data_2002 <- data %>% filter(format(DATE, "%Y") == "2002")
+data_2003 <- data %>% filter(format(DATE, "%Y") == "2003")
+data_2004 <- data %>% filter(format(DATE, "%Y") == "2004")
+
+data_new <- rbind(data_2000,data_2001)
+data_new <- rbind(data_new, data_2002)
+data_new <- rbind(data_new, data_2003)
+data_new <- rbind(data_new, data_2004)
+
+ggplot(data_new, aes(x = DATE, y = FX)) +
+  geom_line() +
+  labs(x = "",
+       y = "Rafales journalières maximales (0.1 m/s)") +
+  theme_minimal()
+```
+
+
+#Premières statistiques descriptives
+```{r}
+boxplot(data$FX, ylab = "Rafales maximales journalières (0.1 m/s)")
+summary(data)
+```
+
+
+
+#Visualisation des rafales maximales par année
+```{r}
+# Conversion en date
+data$DATE <- as.Date(as.character(data$DATE), format = "%Y%m%d")
+
+# Création de la variable SeasonYear
+data$SeasonYear <- ifelse(format(data$DATE, "%m%d") >= "0701", 
+                          format(data$DATE, "%Y"), 
+                          as.character(as.numeric(format(data$DATE, "%Y")) - 1))
+
+# Calcul des rafales maximales par période saisonnière
+library(dplyr)
+max_per_season <- data %>%
+  group_by(SeasonYear) %>%
+  summarize(Max_FX = max(FX, na.rm = TRUE))
+
+# Résultat
+print(max_per_season)
+
+max_per_season <- max_per_season[-75,]
+max_per_season <- max_per_season[-1,]
+
+library(ggplot2)
+
+ggplot(max_per_season, aes(x = SeasonYear, y = Max_FX)) +
+  geom_line(group = 1, color = "blue") +
+  geom_point(color = "red") +
+  labs(title = "Rafale maximale par année",
+       x = "Année", y = "Rafale maximale (FX)") +
+  theme_minimal()
+```
+
+
+#Création du jeu de données max_per_trimester
+```{r}
+# Convertir la date en format Date si nécessaire
+data$DATE <- as.Date(as.character(data$DATE), format = "%Y%m%d")
+
+# Créer une colonne mois et une colonne année
+data$Month <- as.numeric(format(data$DATE, "%m"))
+data$Year <- as.numeric(format(data$DATE, "%Y"))
+
+# Ajuster l'année pour les mois de décembre à février
+data$AdjustedYear <- ifelse(data$Month == 12, data$Year + 1, data$Year)
+
+# Créer une colonne pour les trimestres personnalisés
+data$Trimestre <- cut(data$Month,
+                      breaks = c(0, 2, 5, 8, 11, 12),  # Définir les limites des mois
+                      labels = c("Dec-Feb", "Mar-May", "Jun-Aug", "Sep-Nov", "Dec-Feb"),
+                      right = TRUE)
+
+# Calcul du maximum par trimestre avec l'année ajustée
+library(dplyr)
+max_per_trimester <- data %>%
+  group_by(AdjustedYear, Trimestre) %>%
+  summarize(Max_FX = max(FX, na.rm = TRUE), .groups = "drop")
+
+# Afficher les résultats
+print(max_per_trimester)
+```
+
+
+
+
+#--------------------------------------------
+#----------------STATIONNAIRE----------------
+#--------------------------------------------
+
+
+```{r}
+library(evd)
+fitted <- fgev(max_per_season$Max_FX, nsloc = NULL, prob = NULL, std.err = TRUE, corr = FALSE, method = "BFGS", warn.inf = TRUE)
+par(mfrow = c(2, 2))
+plot(fitted)
+```
+
+```{r}
+IC_lower <- fitted$estimate['loc'] - qnorm(0.975) * fitted$std.err['loc']
+IC_upper <- fitted$estimate['loc'] + qnorm(0.975) * fitted$std.err['loc']
+IC_loc <- cbind(IC_lower, IC_upper)
+
+IC_lower <- fitted$estimate['scale'] - qnorm(0.975) * fitted$std.err['scale']
+IC_upper <- fitted$estimate['scale'] + qnorm(0.975) * fitted$std.err['scale']
+IC_scale <- cbind(IC_lower, IC_upper)
+
+IC_lower <- fitted$estimate['shape'] - qnorm(0.975) * fitted$std.err['shape']
+IC_upper <- fitted$estimate['shape'] + qnorm(0.975) * fitted$std.err['shape']
+IC_shape <- cbind(IC_lower, IC_upper)
+```
+
+```{r}
+confint(fitted)
+```
+
+
+```{r}
+plot(profile(fitted))
+```
+
+
+```{r}
+confint(profile(fitted))
+```
+
+
+
+
+#--------------------------------------------
+#--------------NON-STATIONNAIRE--------------
+#--------------------------------------------
+
+
+```{r}
+install.packages('extRemes')
+```
+
+
+```{r}
+library(extRemes)
+t <- 1:nrow(max_per_trimester)
+fit <- fevd(max_per_trimesterpl$Max_FX, type = "GEV",
+            location.fun = ~ sin(2 * pi * t / 365) + cos(2 * pi * t / 365),
+            scale.fun = ~ t)
+plot(fit)
+```
+
+```{r}
+summary(fit)
+fit$results$par
+```
+
+```{r}
+ci(fit, type = "parameter", method = "normal")
+```
+
+```{r}
+fit_0 <- fevd(max_per_trimester$Max_FX, type = "GEV",
+            location.fun = ~ sin(2 * pi * t / 120) + cos(2 * pi * t / 120))
+
+par(mfrow = c(2,2))
+
+plot(fit_0)
+```
+
+```{r}
+ci(fit_0, type = "parameter", method = "normal")
+```
+
+
+
+```{r}
+lr.test(fit, fit_0)
+```
+
+```{r}
+fit$initial.results$MOM$likelihood
+fit_0$initial.results$MOM$likelihood
+```
+
